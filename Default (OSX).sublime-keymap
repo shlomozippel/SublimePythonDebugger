@@ -1,0 +1,9 @@
+[
+    {"keys": ["f8"], "command": "toggle_breakpoint" }
+    // {"keys": ["f8"], "command": "start_debugging" }
+    // {"keys": ["f8"], "command": "stop_debugging" }
+    // {"keys": ["f8"], "command": "debug_step" }
+    // {"keys": ["f8"], "command": "debug_step_out" }
+    // {"keys": ["f8"], "command": "debug_next" }
+    // {"keys": ["f8"], "command": "debug_continue" }
+]
