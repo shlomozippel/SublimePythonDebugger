@@ -1,0 +1,17 @@
+[
+    {
+        "id": "python_debugger",
+        "caption" : "Python Debugger",
+        "children":
+        [
+            {"caption": "Start for current file", "command" : "debug_current_file"},
+            {"caption": "Stop", "command" : "debug_stop"},
+            {"caption": "Restart", "command" : "debug_restart"},
+            {"caption": "-"},
+            {"caption": "Step in", "command" : "debug_step"},
+            {"caption": "Step out", "command" : "debug_step_out"},
+            {"caption": "Next (Step Over)", "command" : "debug_next"},
+            {"caption": "Continue", "command" : "debug_continue"}
+        ]
+    }
+]

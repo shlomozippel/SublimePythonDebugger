@@ -94,6 +94,9 @@ def line_number_for_region(view, region):
     row, _ = view.rowcol(region.begin())
     return row + 1
 
+def file_type(view):
+    return view.scope_name(0).split(" ")[0].split(".")[1]
+
 def show_file(filename):
     window = sublime.active_window()
     views = window.views()
@@ -114,17 +117,87 @@ def show_file(filename):
 #-----------------------------------------------------------------------------
 # Main debugger interface
 
+class Marker(object):
+    def __init__(self, name, scope="string", icon="dot", flags=sublime.DRAW_EMPTY):
+        self.name = name
+        self.scope = scope
+        self.icon = icon
+        self.view = None
+        self.flags = flags
+        self.region = None
+
+    def mark(self, filename, line_number, scope=None, icon=None, flags=None):
+        if not os.path.exists(filename):
+            return
+        self.clear()
+        self.view = show_file(filename)
+        self.region = region_for_line_number(self.view, line_number)
+        self.view.show(self.region)
+        self.view.add_regions(
+            self.name, 
+            [self.region], 
+            scope or self.scope, 
+            icon or self.icon,
+            flags or self.flags
+        )
+
+    def clear(self, filename=None):
+        if self.view is not None:
+            self.region = None
+            self.view.erase_regions(self.name)
+            self.view = None
+
+
+class PersistentLayout(object):
+    defaults = {
+        'layout' : {
+            "cols": [0.0, 0.5, 1.0],
+            "rows": [0.0, 0.7, 1.0],
+            "cells": [[0, 0, 2, 1], [0, 1, 1, 2], [1, 1, 2, 2]]
+        }
+    }
+
+    def __init__(self):
+        self._window = None
+
+    def apply(self, window=None):
+        if window is None:
+            window = sublime.active_window()
+        self._window = window
+        self._original = sublime.active_window().get_layout()
+        self._window.set_layout(self.get_setting('layout'))
+
+    def revert(self):
+        if self._window is None:
+            return
+        self._window.set_layout(self._original)  
+        self._window = None
+
+    @property
+    def layout(self):
+        return 
+
+    def get_setting(self, key):
+        settings = sublime.load_settings('debug-layout')
+        return settings.get(key, self.defaults[key])
+
+
 class Debugger(ProcessListener, JsonCmd):
     def __init__(self, python_path='python', debugger_path=None):
         JsonCmd.__init__(self)
 
         if debugger_path is None:
             debugger_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debugger.py')
-                    
+        
+        # todo            
+        #self.layout = PersistentLayout()
+        
         self.python_path = python_path
         self.debugger_path = debugger_path
         self.proc = None
-        self.current_view = None
+        self.output_view = None
+        self.debugger_line = Marker('debug-current', scope='comment')
+        self.syntaxerror_line = Marker('debug-syntaxerror', scope='string', icon='bookmark')
 
     @property
     def settings(self):
@@ -138,7 +211,6 @@ class Debugger(ProcessListener, JsonCmd):
         return self.breakpoints.get(filename, {})
 
     def _save_breakpoints(self, breakpoints):
-        print breakpoints
         for k in breakpoints.keys():
             if len(breakpoints[k]) == 0:
                 del breakpoints[k]
@@ -195,33 +267,20 @@ class Debugger(ProcessListener, JsonCmd):
             sublime.PERSISTENT | sublime.HIDDEN
         )
 
-    def draw_current_line(self, filename, line_number):
-        self.clear_current_line()
-        self.current_view = show_file(filename)
-        region = region_for_line_number(self.current_view, line_number)
-        self.current_view.show(region)
-        self.current_view.add_regions(
-            "debug_current",
-            [region],
-            "comment", 
-            "bookmark", 
-            sublime.DRAW_EMPTY
-        )
-
-    def clear_current_line(self):
-        if self.current_view is not None:
-            self.current_view.erase_regions('debug_current')
-            self.current_view = None
-
     def start(self, target):
-        print "Starting to debug", target
-        print "\tPython:", self.python_path
+        self.outputline("Starting to debug {0}".format(target))
 
+        self.syntaxerror_line.clear()
+
+        self._target = target
         if isinstance(target, basestring):
             target = target.split()
 
         if self.running:
             self.stop()
+
+        # todo
+        #self.layout.apply()
 
         self.proc = InteractiveAsyncProcess([self.python_path, '-u', self.debugger_path] + target, {}, self)
         self.command('start', {
@@ -235,20 +294,24 @@ class Debugger(ProcessListener, JsonCmd):
         self.proc.kill()
         self.finish()
 
+    def restart(self):
+        self.stop()
+        self.start(self._target)
+
     def next(self):
-        self.clear_current_line()
+        self.debugger_line.clear()
         self.command('next')
 
     def cont(self):
-        self.clear_current_line()
+        self.debugger_line.clear()
         self.command('continue')
 
     def stepout(self):
-        self.clear_current_line()
+        self.debugger_line.clear()
         self.command('stepout')
 
     def stepin(self):
-        self.clear_current_line()
+        self.debugger_line.clear()
         self.command('stepin')
 
     @property
@@ -267,24 +330,56 @@ class Debugger(ProcessListener, JsonCmd):
             return
         self.proc.write_stdin(data)
 
+    def output(self, data):
+        return
+        if self.output_view is None:
+            print "Creating"
+            self.output_view = sublime.active_window().get_output_panel('debug-output')
+            self.output_view.set_read_only(True)
+        self.output_view.run_command('debug_output', {'data':data})
+        sublime.active_window().run_command('show_panel', {'panel' : 'output.' + 'debug-output'})
+
+    def outputline(self, data):
+        print data
+        #self.output(data + '\n')
+
     def process_line(self, line):
         self.onecmd(line)
 
     def do_break(self, data):
-        #stack = data['stack']
-        #locals = data['locals']
         filename = data['filename']
         line_number = int(data['line_number'])
-        self.draw_current_line(filename, line_number)
-        print 'Break on {0}:{1}'.format(filename, line_number)
+        
+        self.debugger_line.mark(filename, line_number,
+            icon="circle" if self.has_breakpoint(filename, line_number) else "bookmark"
+        )
+
+        self.outputline('Break on {0}:{1}'.format(filename, line_number))
+        for frame in data['stack']:
+            self.outputline("\t<{0}:{1}> {2}".format(frame['filename'], frame['line_number'], frame['formatted']))
+
+    def do_exception(self, data):
+        self.outputline('*** Exception: {0}'.format(data))
+
+    def do_syntaxerror(self, data):
+        filename = data['filename']
+        line_number = int(data['line_number'])
+        msg = data['message']
+        self.syntaxerror_line.mark(filename, line_number)
 
     def do_output(self, data):
-        print '[Output]', data
+        self.outputline('[Output] {0}'.format(data))
 
     def finish(self):
-        print "[Debugger process ended]"
-        self.clear_current_line()
+        if self.proc is None:
+            return
+        self.outputline("[Debugger ended]")
+        sublime.active_window().run_command('hide_panel', {"panel": 'output.debug-output'})
+        self.debugger_line.clear()
         self.proc = None
+        
+        # todo
+        #self.layout.revert()
 
     # called from debugger thread
     def on_data(self, proc, data):
@@ -300,33 +395,93 @@ class Debugger(ProcessListener, JsonCmd):
 debugger = Debugger()
 
 #-----------------------------------------------------------------------------
+# Debug windows
+
+# this class is influenced by ReplView in SublimeREPL
+class DebugWindow(object):
+    def __init__(self, name, interactive=False):
+        self.interactive = interactive
+
+        view = sublime_plugin.active_window().new_file()
+        view.set_scratch(True)
+        view.set_name(name)
+        self.view = view
+
+    def on_selection_modified(self):
+        self.view.set_read_only(not self.interactive or self.delta > 0)
+
+
+
+#-----------------------------------------------------------------------------
 # Sublime Commands
 
-class StartDebuggingCommand(sublime_plugin.WindowCommand):
+# window commands
+
+class DebugStartCommand(sublime_plugin.WindowCommand):
     def run(self, target=''):
         debugger.start(target)
 
-class StopDebuggingCommand(sublime_plugin.WindowCommand):
+class DebugStopCommand(sublime_plugin.WindowCommand):
     def run(self):
         debugger.stop()
+
+    def is_enabled(self):
+        return debugger.running
+
+class DebugRestartCommand(sublime_plugin.WindowCommand):
+    def run(self):
+        debugger.restart()
+
+    def is_enabled(self):
+        return debugger.running
 
 class DebugStepCommand(sublime_plugin.WindowCommand):
     def run(self):
         debugger.stepin()
 
+    def is_enabled(self):
+        return debugger.running
+
 class DebugStepOutCommand(sublime_plugin.WindowCommand):
     def run(self):
         debugger.stepout()
+
+    def is_enabled(self):
+        return debugger.running
+
 
 class DebugNextCommand(sublime_plugin.WindowCommand):
     def run(self):
         debugger.next()
 
+    def is_enabled(self):
+        return debugger.running
+
+
 class DebugContinueCommand(sublime_plugin.WindowCommand):
     def run(self):
         debugger.cont()
 
-class ToggleBreakpointCommand(sublime_plugin.TextCommand):
+    def is_enabled(self):
+        return debugger.running
+
+# text (view) commands
+
+class DebugCurrentFileCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        if not self.view.file_name():
+            return
+        self.view.run_command('save')
+        self.view.window().run_command('debug_start', {'target' : [self.view.file_name()]})
+
+    def is_visible(self):
+        return not debugger.running
+
+    def is_enabled(self):
+        return file_type(self.view) in ["python"]
+
+
+class DebugToggleBreakpointCommand(sublime_plugin.TextCommand):
     def run(self, edit):
         # no breakpoints if file isn't saved on disk
         filename = self.view.file_name()
@@ -339,6 +494,30 @@ class ToggleBreakpointCommand(sublime_plugin.TextCommand):
 
         debugger.draw_breakpoints(self.view)
 
+
+class DebugOutputCommand(sublime_plugin.TextCommand):
+    def run(self, edit, data):
+        at_end = self.view.sel()[0].begin() == self.view.size()
+        self.view.set_read_only(False)
+        self.view.insert(edit, self.view.size(), data)
+        if at_end:
+            self.view.show(self.view.size())
+        self.view.set_read_only(True)
+
+
 class DebuggerListener(sublime_plugin.EventListener):
     def on_load(self, view):
         debugger.draw_breakpoints(view)
+
+    def on_query_context(self, view, key, operator, operand, match_all):
+        if key == "debugger_running":
+            return debugger.running
+        return None
+
+    def on_selection_modified(self, view):
+        syntax_err_view = debugger.syntaxerror_line.view
+        if syntax_err_view and syntax_err_view.id() == view.id():
+            for r in view.sel():
+                if r.intersects(debugger.syntaxerror_line.region):
+                    debugger.syntaxerror_line.clear()
+                    break

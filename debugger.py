@@ -48,12 +48,19 @@ class JsonDebugger(bdb.Bdb, JsonCmd):
         self.curframe = self.stack[self.curindex][0]
 
     def send_state(self):
+        stack_json = []
+        for frame, line_number in self.stack:
+            stack_json.append({
+                'filename' : frame.f_code.co_filename,
+                'line_number' : frame.f_lineno,
+                'formatted' : frame.f_code.co_name or "<lambda>",
+            })
         frame = self.curframe
         write_command('break', {
             'filename' : frame.f_code.co_filename,
             'line_number' : frame.f_lineno,
             #'locals' : frame.f_locals,
-            #'stack' : self.stack,
+            'stack' : stack_json,
         }, self.stdout)
 
     def interaction(self, frame, traceback):
@@ -94,7 +101,25 @@ class JsonDebugger(bdb.Bdb, JsonCmd):
         sys.argv = target
         mainpyfile = target[0]        
         sys.path[0] = os.path.dirname(mainpyfile)
-        self.run_script(mainpyfile)
+        try:
+            self.run_script(mainpyfile)
+        except SyntaxError:
+            value = sys.exc_info()[1]
+            msg, (filename, lineno, offset, badline) = value.args
+            write_command('syntaxerror', {
+                'filename' : filename,
+                'line_number' : lineno,
+                'message' : msg,
+            }, self.stdout)
+
+        except:
+            etype, value, t = sys.exc_info()
+            write_command('exception', {
+                'type' : etype.__name__,
+                'value' : str(value),
+            }, self.stdout)
+            self.interaction(t.tb_frame, t)
+
         return True
 
     def do_addbreakpoint(self, data):

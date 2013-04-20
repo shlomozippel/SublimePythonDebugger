@@ -46,4 +46,4 @@ class JsonCmd(object):
             return func(data)
 
     def default(self, line):
-        self.stdout.write('*** Unknown syntax: %s\n'%line)
+        self.stdout.write('*** %s'%line)
