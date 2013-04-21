@@ -1,4 +1,5 @@
 import json
+import sys
 
 class JsonCmd(object):
     """
@@ -15,17 +16,24 @@ class JsonCmd(object):
         else:
             self.stdout = sys.stdout
 
-    def cmdloop(self):
-        stop = None
-        while not stop:
+    def readline(self):
+        while True:
             line = self.stdin.readline()
             if not len(line):
-                self.stdout.write('*** EOF\n')
                 break
-            stop = self.onecmd(line)
+            line = line.split('\n')
+            for l in line:
+                yield l
+
+    def cmdloop(self, lines=None):
+        for line in lines or self.readline():
+            line = line.strip()
+            if len(line) == 0:
+                continue
+            if self.onecmd(line):
+                break
  
     def parseline(self, line):
-        line = line.strip()
         try:
             parsed = json.loads(line)
             cmd = parsed['command']

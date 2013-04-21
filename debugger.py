@@ -47,25 +47,29 @@ class JsonDebugger(bdb.Bdb, JsonCmd):
         self.stack, self.curindex = self.get_stack(frame, traceback)
         self.curframe = self.stack[self.curindex][0]
 
-    def send_state(self):
+    def send_break(self, break_type, filename, line_number, msg):
         stack_json = []
-        for frame, line_number in self.stack:
+        for frame, line_no in self.stack:
             stack_json.append({
                 'filename' : frame.f_code.co_filename,
                 'line_number' : frame.f_lineno,
                 'formatted' : frame.f_code.co_name or "<lambda>",
             })
-        frame = self.curframe
         write_command('break', {
-            'filename' : frame.f_code.co_filename,
-            'line_number' : frame.f_lineno,
-            #'locals' : frame.f_locals,
+            'filename' : filename,
+            'line_number' : line_number,
+            'type' : break_type,
+            'msg' : msg,
             'stack' : stack_json,
+            #'locals' : frame.f_locals,
         }, self.stdout)
 
-    def interaction(self, frame, traceback):
-        self.setup(frame, traceback)
-        self.send_state()
+    def interaction(self, filename=None, line_number=None, break_type='trace', msg=''):
+        if filename is None:
+            filename = self.curframe.f_code.co_filename
+        if line_number is None:
+            line_number = self.curframe.f_lineno
+        self.send_break(break_type, filename, line_number, msg)
         self.cmdloop()
         self.forget()
 
@@ -75,7 +79,8 @@ class JsonDebugger(bdb.Bdb, JsonCmd):
             self.first_time = False
             return
 
-        self.interaction(frame, None)
+        self.setup(frame, None)
+        self.interaction()
 
     def run_script(self, filename):
         # sanitize the environment for the script we are debugging
@@ -104,22 +109,22 @@ class JsonDebugger(bdb.Bdb, JsonCmd):
         try:
             self.run_script(mainpyfile)
         except SyntaxError:
-            value = sys.exc_info()[1]
+            etype, value, t = sys.exc_info()
             msg, (filename, lineno, offset, badline) = value.args
-            write_command('syntaxerror', {
-                'filename' : filename,
-                'line_number' : lineno,
-                'message' : msg,
-            }, self.stdout)
-
+            self.setup(t.tb_frame, t)
+            self.interaction(
+                filename=filename, 
+                line_number=lineno, 
+                break_type='syntaxerror', 
+                msg="{0}: {1}".format(etype.__name__, msg)
+            )
         except:
             etype, value, t = sys.exc_info()
-            write_command('exception', {
-                'type' : etype.__name__,
-                'value' : str(value),
-            }, self.stdout)
-            self.interaction(t.tb_frame, t)
-
+            self.setup(t.tb_frame, t)
+            self.interaction(
+                msg="{0}: {1}".format(etype.__name__, str(value)),
+                break_type='exception'
+            )
         return True
 
     def do_addbreakpoint(self, data):

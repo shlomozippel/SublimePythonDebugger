@@ -1,6 +1,6 @@
 import sublime, sublime_plugin
 import os, sys
-import thread
+import threading
 import subprocess
 import functools
 import time
@@ -19,7 +19,7 @@ class ProcessListener(object):
 
 
 class InteractiveAsyncProcess(object):
-    def __init__(self, arg_list, env, listener, path="", shell=False):
+    def __init__(self, arg_list, env, listener, path=""):
 
         self.listener = listener
         self.killed = False
@@ -45,15 +45,16 @@ class InteractiveAsyncProcess(object):
             proc_env[k] = os.path.expandvars(v).encode(sys.getfilesystemencoding())
 
         self.proc = subprocess.Popen(arg_list, stdout=subprocess.PIPE, stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE, startupinfo=startupinfo, env=proc_env, shell=shell)
+            stderr=subprocess.PIPE, startupinfo=startupinfo, env=proc_env, shell=False)
 
         if path:
             os.environ["PATH"] = old_path
 
         if self.proc.stdout:
-            thread.start_new_thread(self.read_thread, (self.proc.stdout,))
+            threading.Thread(target=self.read_stdout).start()
+
         if self.proc.stderr:
-            thread.start_new_thread(self.read_thread, (self.proc.stderr,))
+            threading.Thread(target=self.read_stderr).start() 
 
     def kill(self):
         if not self.killed:
@@ -67,19 +68,29 @@ class InteractiveAsyncProcess(object):
     def exit_code(self):
         return self.proc.poll()
 
-    def read_thread(self, fd):
+    def read_stdout(self):
         while True:
-            data = fd.readline()
-            
-            if data != "":
+            data = os.read(self.proc.stdout.fileno(), 2**15)
+
+            if len(data) > 0:
                 if self.listener:
                     self.listener.on_data(self, data)
             else:
-                fd.close()
+                self.proc.stdout.close()
                 if self.listener:
                     self.listener.on_finished(self)
                 break
 
+    def read_stderr(self):
+        while True:
+            data = os.read(self.proc.stderr.fileno(), 2**15)
+
+            if len(data) > 0:
+                if self.listener:
+                    self.listener.on_data(self, data)
+            else:
+                self.proc.stderr.close()
+                break 
     def write_stdin(self, data):
         ret = os.write(self.proc.stdin.fileno(), data)
         self.proc.stdin.flush()
@@ -160,17 +171,41 @@ class PersistentLayout(object):
     def __init__(self):
         self._window = None
 
+    def save_original_layout(self, window):
+        self._original_layout = window.get_layout()
+        self._original_views = [[v.id() for v in window.views_in_group(i)] for i in range(window.num_groups())]
+        self._original_group = window.active_group()
+        self._original_active = window.active_view().id()
+
+    def load_original_layout(self, window):
+        self._window.set_layout(self._original_layout)
+        current_views = dict([(v.id(), v) for v in window.views()])
+        for i, view_ids in enumerate(self._original_views):
+            for vid in view_ids:
+                if vid in current_views:
+                    self.move_to_group(current_views[vid], i)
+        window.focus_group(self._original_group)
+        if self._original_active in current_views:
+            window.focus_view(current_views[self._original_active])
+        
+    def move_to_group(self, view, group):
+        if self._window.get_view_index(view)[0] != group:
+            self._window.set_view_index(view, group, len(self._window.views_in_group(group)))
+
     def apply(self, window=None):
         if window is None:
             window = sublime.active_window()
         self._window = window
-        self._original = sublime.active_window().get_layout()
-        self._window.set_layout(self.get_setting('layout'))
+
+        self.save_original_layout(window)
+        window.set_layout(self.get_setting('layout'))
+        for v in window.views():
+            self.move_to_group(v, 0)
 
     def revert(self):
         if self._window is None:
             return
-        self._window.set_layout(self._original)  
+        self.load_original_layout(self._window)
         self._window = None
 
     @property
@@ -189,9 +224,7 @@ class Debugger(ProcessListener, JsonCmd):
         if debugger_path is None:
             debugger_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debugger.py')
         
-        # todo            
-        #self.layout = PersistentLayout()
-        
+        self.layout = PersistentLayout()
         self.python_path = python_path
         self.debugger_path = debugger_path
         self.proc = None
@@ -280,7 +313,7 @@ class Debugger(ProcessListener, JsonCmd):
             self.stop()
 
         # todo
-        #self.layout.apply()
+        self.layout.apply()
 
         self.proc = InteractiveAsyncProcess([self.python_path, '-u', self.debugger_path] + target, {}, self)
         self.command('start', {
@@ -333,7 +366,6 @@ class Debugger(ProcessListener, JsonCmd):
     def output(self, data):
         return
         if self.output_view is None:
-            print "Creating"
             self.output_view = sublime.active_window().get_output_panel('debug-output')
             self.output_view.set_read_only(True)
         self.output_view.run_command('debug_output', {'data':data})
@@ -341,20 +373,24 @@ class Debugger(ProcessListener, JsonCmd):
 
     def outputline(self, data):
         print data
-        #self.output(data + '\n')
 
     def process_line(self, line):
-        self.onecmd(line)
+        self.cmdloop(line.split('\n'))
 
     def do_break(self, data):
         filename = data['filename']
         line_number = int(data['line_number'])
+        break_type = data['type']
+        msg = data['msg']
         
         self.debugger_line.mark(filename, line_number,
-            icon="circle" if self.has_breakpoint(filename, line_number) else "bookmark"
+            icon="circle" if self.has_breakpoint(filename, line_number) else "bookmark",
+            scope='comment' if break_type in ['exception', 'syntaxerror'] else "string"
         )
 
-        self.outputline('Break on {0}:{1}'.format(filename, line_number))
+        self.outputline('Break ({0}) on {1}:{2}'.format(break_type, filename, line_number))
+        if len(msg) > 0:
+            self.outputline('> {0}'.format(msg))
         for frame in data['stack']:
             self.outputline("\t<{0}:{1}> {2}".format(frame['filename'], frame['line_number'], frame['formatted']))
 
@@ -365,6 +401,7 @@ class Debugger(ProcessListener, JsonCmd):
         filename = data['filename']
         line_number = int(data['line_number'])
         msg = data['message']
+        sublime.status
         self.syntaxerror_line.mark(filename, line_number)
 
     def do_output(self, data):
@@ -374,12 +411,12 @@ class Debugger(ProcessListener, JsonCmd):
         if self.proc is None:
             return
         self.outputline("[Debugger ended]")
-        sublime.active_window().run_command('hide_panel', {"panel": 'output.debug-output'})
+        #sublime.active_window().run_command('hide_panel', {"panel": 'output.debug-output'})
         self.debugger_line.clear()
         self.proc = None
         
         # todo
-        #self.layout.revert()
+        self.layout.revert()
 
     # called from debugger thread
     def on_data(self, proc, data):
