@@ -125,6 +125,11 @@ def show_file(filename):
         view = window.open_file(filename)
     return view
 
+def move_to_group(window, view, group):
+    if window.get_view_index(view)[0] != group:
+        window.set_view_index(view, group, len(window.views_in_group(group)))
+
+
 #-----------------------------------------------------------------------------
 # Main debugger interface
 
@@ -159,12 +164,17 @@ class Marker(object):
             self.view = None
 
 
-class PersistentLayout(object):
+class DebugLayout(object):
     defaults = {
         'layout' : {
             "cols": [0.0, 0.5, 1.0],
             "rows": [0.0, 0.7, 1.0],
             "cells": [[0, 0, 2, 1], [0, 1, 1, 2], [1, 1, 2, 2]]
+        },
+        'layout-sdfsf' : {
+            "cols": [0.0, 0.4, 0.8, 1.0],
+            "rows": [0.0, 0.8, 1.0],
+            "cells": [[0, 0, 2, 1], [0, 1, 1, 2], [1, 1, 2, 2], [2, 0, 3, 2]]
         }
     }
 
@@ -178,12 +188,12 @@ class PersistentLayout(object):
         self._original_active = window.active_view().id()
 
     def load_original_layout(self, window):
-        self._window.set_layout(self._original_layout)
+        window.set_layout(self._original_layout)
         current_views = dict([(v.id(), v) for v in window.views()])
         for i, view_ids in enumerate(self._original_views):
             for vid in view_ids:
                 if vid in current_views:
-                    self.move_to_group(current_views[vid], i)
+                    move_to_group(window, current_views[vid], i)
         window.focus_group(self._original_group)
         if self._original_active in current_views:
             window.focus_view(current_views[self._original_active])
@@ -200,7 +210,7 @@ class PersistentLayout(object):
         self.save_original_layout(window)
         window.set_layout(self.get_setting('layout'))
         for v in window.views():
-            self.move_to_group(v, 0)
+            move_to_group(window, v, 0)
 
     def revert(self):
         if self._window is None:
@@ -216,6 +226,69 @@ class PersistentLayout(object):
         settings = sublime.load_settings('debug-layout')
         return settings.get(key, self.defaults[key])
 
+#-----------------------------------------------------------------------------
+# Debug windows
+
+# this class is influenced by ReplView in SublimeREPL
+class DebugWindow(object):
+    def __init__(self, name, interactive=False, group=None, window=None):
+        self.interactive = interactive
+
+        if window is None:
+            window = sublime.active_window()
+        self.window = window
+
+        view = DebugWindow.find_by_name(name)
+        if view is None:
+            view = window.new_file()
+
+        view.set_scratch(True)
+        view.set_name(name)
+        self.view = view
+        view.settings().set('debugwindow', True)
+        view.settings().set('gutter', False)
+        view.settings().set('auto_indent', False)
+
+        if group is not None:
+            move_to_group(window, self.view, group)
+
+    def close(self):
+        if self.view is None:
+            return
+        group, index = self.window.get_view_index(self.view)
+        self.window.run_command('close_by_index', {'group':group, 'index':index})
+        self.view = None
+
+    def append(self, data):
+        self.view.set_read_only(False)
+        self.view.run_command('insert', {'characters':data})
+        self.view.set_read_only(True)
+        
+    def clear(self):
+        self.view.run_command('select_all')
+        self.view.run_command('insert', {'characters':''})
+
+    def appendline(self, data):
+        self.append(data + '\n')
+
+    _views = {}
+
+    @classmethod
+    def find_by_name(cls, name):
+        if name in cls._views:
+            return cls._views[name]
+        return None
+
+    @classmethod
+    def find_by_id(cls, vid):
+        for name, view in cls._views.iteritems():
+            if view.id() == vid:
+                return view
+        return None
+
+#-----------------------------------------------------------------------------
+# Debugger class - main interface to debugged process. Launched debugger.py
+# and communicates with it via json commands over stdio
 
 class Debugger(ProcessListener, JsonCmd):
     def __init__(self, python_path='python', debugger_path=None):
@@ -224,11 +297,11 @@ class Debugger(ProcessListener, JsonCmd):
         if debugger_path is None:
             debugger_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debugger.py')
         
-        self.layout = PersistentLayout()
+        self.layout = DebugLayout()
         self.python_path = python_path
         self.debugger_path = debugger_path
         self.proc = None
-        self.output_view = None
+        self.output_pane = None
         self.debugger_line = Marker('debug-current', scope='comment')
         self.syntaxerror_line = Marker('debug-syntaxerror', scope='string', icon='bookmark')
 
@@ -301,8 +374,6 @@ class Debugger(ProcessListener, JsonCmd):
         )
 
     def start(self, target):
-        self.outputline("Starting to debug {0}".format(target))
-
         self.syntaxerror_line.clear()
 
         self._target = target
@@ -312,8 +383,11 @@ class Debugger(ProcessListener, JsonCmd):
         if self.running:
             self.stop()
 
-        # todo
         self.layout.apply()
+        self.output_pane = DebugWindow('Output', group=1)
+        self.stack_pane = DebugWindow('Call Stack', group=2)
+
+        self.outputline("Starting to debug {0}".format(target))
 
         self.proc = InteractiveAsyncProcess([self.python_path, '-u', self.debugger_path] + target, {}, self)
         self.command('start', {
@@ -364,15 +438,10 @@ class Debugger(ProcessListener, JsonCmd):
         self.proc.write_stdin(data)
 
     def output(self, data):
-        return
-        if self.output_view is None:
-            self.output_view = sublime.active_window().get_output_panel('debug-output')
-            self.output_view.set_read_only(True)
-        self.output_view.run_command('debug_output', {'data':data})
-        sublime.active_window().run_command('show_panel', {'panel' : 'output.' + 'debug-output'})
+        self.output_pane.append(data)
 
     def outputline(self, data):
-        print data
+        self.output_pane.appendline(data)
 
     def process_line(self, line):
         self.cmdloop(line.split('\n'))
@@ -388,11 +457,13 @@ class Debugger(ProcessListener, JsonCmd):
             scope='comment' if break_type in ['exception', 'syntaxerror'] else "string"
         )
 
-        self.outputline('Break ({0}) on {1}:{2}'.format(break_type, filename, line_number))
         if len(msg) > 0:
+            sublime.status_message(msg)
             self.outputline('> {0}'.format(msg))
+
+        self.stack_pane.clear()
         for frame in data['stack']:
-            self.outputline("\t<{0}:{1}> {2}".format(frame['filename'], frame['line_number'], frame['formatted']))
+            self.stack_pane.appendline("<{0}:{1}> {2}".format(frame['filename'], frame['line_number'], frame['formatted']))
 
     def do_exception(self, data):
         self.outputline('*** Exception: {0}'.format(data))
@@ -405,17 +476,20 @@ class Debugger(ProcessListener, JsonCmd):
         self.syntaxerror_line.mark(filename, line_number)
 
     def do_output(self, data):
-        self.outputline('[Output] {0}'.format(data))
+        self.output(data)
 
     def finish(self):
         if self.proc is None:
             return
-        self.outputline("[Debugger ended]")
+        
+        self.outputline("[Debug session ended]")
+        sublime.status_message("Debug session ended")
         #sublime.active_window().run_command('hide_panel', {"panel": 'output.debug-output'})
         self.debugger_line.clear()
         self.proc = None
         
-        # todo
+        self.output_pane.close()
+        self.stack_pane.close()
         self.layout.revert()
 
     # called from debugger thread
@@ -430,22 +504,6 @@ class Debugger(ProcessListener, JsonCmd):
 # maybe read from build settings using SublimeREPL build system hack?
 # debugger = Debugger(python_path='path/to/venv')
 debugger = Debugger()
-
-#-----------------------------------------------------------------------------
-# Debug windows
-
-# this class is influenced by ReplView in SublimeREPL
-class DebugWindow(object):
-    def __init__(self, name, interactive=False):
-        self.interactive = interactive
-
-        view = sublime_plugin.active_window().new_file()
-        view.set_scratch(True)
-        view.set_name(name)
-        self.view = view
-
-    def on_selection_modified(self):
-        self.view.set_read_only(not self.interactive or self.delta > 0)
 
 
 
