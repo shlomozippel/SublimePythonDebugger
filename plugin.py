@@ -301,6 +301,12 @@ class Debugger(ProcessListener, JsonCmd):
                 del breakpoints[k]
         self.settings.set('breakpoints', breakpoints)
 
+    def save_breakpoints(self):
+        bps = self.breakpoints
+        for filename in bps.keys():
+            bps.update({filename:self.breakpoints_for_file(filename)})
+        self._save_breakpoints(bps)
+
     def add_breakpoint(self, filename, line_number):
         bps = self.breakpoints_for_file(filename)
         if line_number not in bps:
@@ -362,6 +368,8 @@ class Debugger(ProcessListener, JsonCmd):
 
         if self.running:
             self.stop()
+
+        self.save_breakpoints()
 
         self.layout.apply()
         self.output_pane = DebugWindow('Output', group=1)
