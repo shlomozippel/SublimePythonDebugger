@@ -6,6 +6,7 @@ import functools
 import time
 import json
 from jsoncmd import JsonCmd
+import util
 
 #-----------------------------------------------------------------------------
 # Inspired by AsyncProcess in Packages/Default/exec.py
@@ -91,44 +92,11 @@ class InteractiveAsyncProcess(object):
             else:
                 self.proc.stderr.close()
                 break 
+
     def write_stdin(self, data):
         ret = os.write(self.proc.stdin.fileno(), data)
         self.proc.stdin.flush()
-
-#-----------------------------------------------------------------------------
-# Utils
-
-def region_for_line_number(view, line_number):
-    return view.line(view.text_point(line_number - 1, 0))
-
-def line_number_for_region(view, region):
-    row, _ = view.rowcol(region.begin())
-    return row + 1
-
-def file_type(view):
-    return view.scope_name(0).split(" ")[0].split(".")[1]
-
-def show_file(filename):
-    window = sublime.active_window()
-    views = window.views()
-    found = False
-    for v in views:
-        if v.file_name():
-            path = os.path.realpath(v.file_name())
-            if path == os.path.realpath(filename):
-                view = v
-                window.focus_view(v)
-                found = True
-                break
-    if not found:
-        window.focus_group(0)
-        view = window.open_file(filename)
-    return view
-
-def move_to_group(window, view, group):
-    if window.get_view_index(view)[0] != group:
-        window.set_view_index(view, group, len(window.views_in_group(group)))
-
+        return ret
 
 #-----------------------------------------------------------------------------
 # Main debugger interface
@@ -146,8 +114,8 @@ class Marker(object):
         if not os.path.exists(filename):
             return
         self.clear()
-        self.view = show_file(filename)
-        self.region = region_for_line_number(self.view, line_number)
+        self.view = util.show_file(filename)
+        self.region = util.region_for_line_number(self.view, line_number)
         self.view.show(self.region)
         self.view.add_regions(
             self.name, 
@@ -193,7 +161,7 @@ class DebugLayout(object):
         for i, view_ids in enumerate(self._original_views):
             for vid in view_ids:
                 if vid in current_views:
-                    move_to_group(window, current_views[vid], i)
+                    util.move_to_group(window, current_views[vid], i)
         window.focus_group(self._original_group)
         if self._original_active in current_views:
             window.focus_view(current_views[self._original_active])
@@ -210,7 +178,7 @@ class DebugLayout(object):
         self.save_original_layout(window)
         window.set_layout(self.get_setting('layout'))
         for v in window.views():
-            move_to_group(window, v, 0)
+            util.move_to_group(window, v, 0)
 
     def revert(self):
         if self._window is None:
@@ -250,7 +218,7 @@ class DebugWindow(object):
         view.settings().set('auto_indent', False)
 
         if group is not None:
-            move_to_group(window, self.view, group)
+            util.move_to_group(window, self.view, group)
 
     def close(self):
         if self.view is None:
@@ -286,8 +254,9 @@ class DebugWindow(object):
                 return view
         return None
 
+
 #-----------------------------------------------------------------------------
-# Debugger class - main interface to debugged process. Launched debugger.py
+# Debugger class - main interface to debugged process. Launches debugger.py
 # and communicates with it via json commands over stdio
 
 class Debugger(ProcessListener, JsonCmd):
@@ -314,7 +283,17 @@ class Debugger(ProcessListener, JsonCmd):
         return self.settings.get('breakpoints', {})
 
     def breakpoints_for_file(self, filename):
-        return self.breakpoints.get(filename, {})
+        views = list(util.views_for_file(filename))
+        if len(views) > 0:
+            view = views[0]
+            regions = view.get_regions("debug_breakpoint")
+            line_numbers = [util.line_number_for_region(view, r) for r in regions]
+            return line_numbers
+        else:
+            return self._load_for_file(filename)
+
+    def _load_for_file(self, filename):
+        return self.breakpoints.get(filename, [])
 
     def _save_breakpoints(self, breakpoints):
         for k in breakpoints.keys():
@@ -322,9 +301,10 @@ class Debugger(ProcessListener, JsonCmd):
                 del breakpoints[k]
         self.settings.set('breakpoints', breakpoints)
 
-    def add_breakpoint(self, filename, line_number, context={}):
+    def add_breakpoint(self, filename, line_number):
         bps = self.breakpoints_for_file(filename)
-        bps[str(line_number)] = context
+        if line_number not in bps:
+            bps.append(line_number)
         breakpoints = self.breakpoints
         breakpoints.update({filename:bps})
         self._save_breakpoints(breakpoints)
@@ -337,8 +317,8 @@ class Debugger(ProcessListener, JsonCmd):
 
     def remove_breakpoint(self, filename, line_number):
         bps = self.breakpoints_for_file(filename)
-        if str(line_number) in bps:
-            del bps[str(line_number)]
+        if line_number in bps:
+            bps.remove(line_number)
         breakpoints = self.breakpoints
         breakpoints.update({filename:bps})
         self._save_breakpoints(breakpoints)
@@ -350,7 +330,7 @@ class Debugger(ProcessListener, JsonCmd):
             })
 
     def has_breakpoint(self, filename, line_number):
-        return str(line_number) in self.breakpoints_for_file(filename)
+        return line_number in self.breakpoints_for_file(filename)
 
     def toggle_breakpoint(self, filename, line_number):
         if self.has_breakpoint(filename, line_number):
@@ -363,8 +343,8 @@ class Debugger(ProcessListener, JsonCmd):
         if filename is None:
             return
 
-        line_numbers = [int(k) for k in self.breakpoints_for_file(filename).keys()]
-        regions = [region_for_line_number(view, n) for n in line_numbers]
+        line_numbers = self._load_for_file(filename)
+        regions = [util.region_for_line_number(view, n) for n in line_numbers]
         view.add_regions(
             "debug_breakpoint", 
             regions, 
@@ -468,13 +448,6 @@ class Debugger(ProcessListener, JsonCmd):
     def do_exception(self, data):
         self.outputline('*** Exception: {0}'.format(data))
 
-    def do_syntaxerror(self, data):
-        filename = data['filename']
-        line_number = int(data['line_number'])
-        msg = data['message']
-        sublime.status
-        self.syntaxerror_line.mark(filename, line_number)
-
     def do_output(self, data):
         self.output(data)
 
@@ -484,7 +457,7 @@ class Debugger(ProcessListener, JsonCmd):
         
         self.outputline("[Debug session ended]")
         sublime.status_message("Debug session ended")
-        #sublime.active_window().run_command('hide_panel', {"panel": 'output.debug-output'})
+
         self.debugger_line.clear()
         self.proc = None
         
@@ -504,7 +477,6 @@ class Debugger(ProcessListener, JsonCmd):
 # maybe read from build settings using SublimeREPL build system hack?
 # debugger = Debugger(python_path='path/to/venv')
 debugger = Debugger()
-
 
 
 #-----------------------------------------------------------------------------
@@ -573,7 +545,7 @@ class DebugCurrentFileCommand(sublime_plugin.TextCommand):
         return not debugger.running
 
     def is_enabled(self):
-        return file_type(self.view) in ["python"]
+        return util.file_type(self.view) in ["python"]
 
 
 class DebugToggleBreakpointCommand(sublime_plugin.TextCommand):
@@ -583,7 +555,7 @@ class DebugToggleBreakpointCommand(sublime_plugin.TextCommand):
         if filename is None:
             return
 
-        line_numbers = [line_number_for_region(self.view, r) for r in self.view.sel()]
+        line_numbers = [util.line_number_for_region(self.view, r) for r in self.view.sel()]
         for line_number in line_numbers:
             debugger.toggle_breakpoint(filename, line_number)
 

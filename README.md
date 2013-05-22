@@ -5,7 +5,6 @@ Debug python directly from Sublime Text
 
 TODO:
 
-- Fix "sticky" breakpoints
 - Interactive stdin/stdout
 - Interactive interpreter
 - Make call stack window keyboard navigable
