@@ -99,8 +99,8 @@ class JsonDebugger(bdb.Bdb, JsonCmd):
         target = data['target']
         breakpoints = data['breakpoints']
         for filename in breakpoints.keys():
-            for line_number in breakpoints[filename].keys():
-                self.set_break(filename, int(line_number))
+            for line_number in breakpoints[filename]:
+                self.set_break(filename, line_number)
 
         # lets simulate the environment
         sys.argv = target
@@ -129,7 +129,7 @@ class JsonDebugger(bdb.Bdb, JsonCmd):
 
     def do_addbreakpoint(self, data):
         filename = data['filename']
-        line_number = int(data['line_number'])
+        line_number = data['line_number']
         self.set_break(filename, line_number)
 
     def do_removebreakpoint(self, data):
