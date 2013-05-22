@@ -301,10 +301,11 @@ class Debugger(ProcessListener, JsonCmd):
                 del breakpoints[k]
         self.settings.set('breakpoints', breakpoints)
 
-    def save_breakpoints(self):
+    def save_breakpoints(self, filename=None):
         bps = self.breakpoints
-        for filename in bps.keys():
-            bps.update({filename:self.breakpoints_for_file(filename)})
+        for f in bps.keys():
+            if filename and filename != f: continue
+            bps.update({f:self.breakpoints_for_file(f)})
         self._save_breakpoints(bps)
 
     def add_breakpoint(self, filename, line_number):
@@ -567,7 +568,8 @@ class DebugToggleBreakpointCommand(sublime_plugin.TextCommand):
         for line_number in line_numbers:
             debugger.toggle_breakpoint(filename, line_number)
 
-        debugger.draw_breakpoints(self.view)
+        for view in util.views_for_file(filename):
+            debugger.draw_breakpoints(view)
 
 
 class DebugOutputCommand(sublime_plugin.TextCommand):
@@ -583,6 +585,15 @@ class DebugOutputCommand(sublime_plugin.TextCommand):
 class DebuggerListener(sublime_plugin.EventListener):
     def on_load(self, view):
         debugger.draw_breakpoints(view)
+
+    def on_new(self, view):
+        debugger.draw_breakpoints(view)
+
+    def on_clone(self, view):
+        debugger.draw_breakpoints(view)
+
+    def on_pre_save(self, view):
+        debugger.save_breakpoints(view.file_name())
 
     def on_query_context(self, view, key, operator, operand, match_all):
         if key == "debugger_running":
